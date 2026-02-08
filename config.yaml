@@ -39,6 +39,22 @@ output:
   filename: "Trial Balance_{date}.xlsx"
   date_format: "%Y-%m-%d"
 
+report:
+  enabled: true
+  output_dir: "output"
+  filename: "Trial Balance_report_{date}.xlsx"
+  date_format: "%Y-%m-%d"
+  sheet_name: "Report"
+  header_rows: "1:7"
+  company_line: "5568/25FCS Fiber - Components - Slovakia s.r.o."
+  company_address: "SK-94901 Nitra"
+  report_title: "Saldenliste Sachkonten"
+  report_number: "9204/7.8.2536"
+  language: "GER"
+  datetime_format: "%d.%m.%Y/%H:%M"
+  period_label: "Periode 2025/11 - 2025/11"
+  cumulative_label: "Kumuliert 2025/01 - 2025/11"
+
 rules:
   missing_in_source: "fill_zero"
   duplicate_accounts: "sum"
