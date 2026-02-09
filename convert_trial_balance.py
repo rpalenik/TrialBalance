@@ -13,7 +13,7 @@ from typing import Any, Dict, Iterable, Tuple
 import pandas as pd
 import yaml
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import column_index_from_string
 
 
@@ -288,6 +288,8 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
     center = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left = Alignment(horizontal="left", vertical="center", wrap_text=True)
     right = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    thin = Side(style="thin", color="000000")
+    medium = Side(style="medium", color="000000")
 
     # Column widths
     ws.column_dimensions["A"].width = 10
@@ -327,32 +329,40 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
     ws.cell(row=6, column=2).alignment = center
 
     ws.merge_cells(start_row=6, start_column=3, end_row=7, end_column=3)
-    ws.cell(row=6, column=3, value="Saldo").font = table_header_font
+    ws.cell(row=6, column=3, value="Erstsaldo").font = table_header_font
     ws.cell(row=6, column=3).alignment = center
 
-    ws.merge_cells(start_row=6, start_column=4, end_row=7, end_column=4)
-    ws.cell(row=6, column=4, value="Erstsaldo").font = table_header_font
+    ws.merge_cells(start_row=6, start_column=4, end_row=6, end_column=5)
+    ws.cell(row=6, column=4, value=rep_cfg.get("period_label", "")).font = table_header_font
     ws.cell(row=6, column=4).alignment = center
-
-    ws.merge_cells(start_row=6, start_column=5, end_row=6, end_column=6)
-    ws.cell(row=6, column=5, value=rep_cfg.get("period_label", "")).font = table_header_font
-    ws.cell(row=6, column=5).alignment = center
-    ws.cell(row=7, column=5, value="Soll").font = table_header_font
+    ws.cell(row=7, column=4, value="Soll").font = table_header_font
+    ws.cell(row=7, column=4).alignment = center
+    ws.cell(row=7, column=5, value="Haben").font = table_header_font
     ws.cell(row=7, column=5).alignment = center
-    ws.cell(row=7, column=6, value="Haben").font = table_header_font
-    ws.cell(row=7, column=6).alignment = center
 
-    ws.merge_cells(start_row=6, start_column=7, end_row=6, end_column=8)
-    ws.cell(row=6, column=7, value=rep_cfg.get("cumulative_label", "")).font = table_header_font
-    ws.cell(row=6, column=7).alignment = center
-    ws.cell(row=7, column=7, value="Soll").font = table_header_font
+    ws.merge_cells(start_row=6, start_column=6, end_row=6, end_column=7)
+    ws.cell(row=6, column=6, value=rep_cfg.get("cumulative_label", "")).font = table_header_font
+    ws.cell(row=6, column=6).alignment = center
+    ws.cell(row=7, column=6, value="Soll").font = table_header_font
+    ws.cell(row=7, column=6).alignment = center
+    ws.cell(row=7, column=7, value="Haben").font = table_header_font
     ws.cell(row=7, column=7).alignment = center
-    ws.cell(row=7, column=8, value="Haben").font = table_header_font
-    ws.cell(row=7, column=8).alignment = center
+
+    ws.merge_cells(start_row=6, start_column=8, end_row=7, end_column=8)
+    ws.cell(row=6, column=8, value="Saldo").font = table_header_font
+    ws.cell(row=6, column=8).alignment = center
 
     # Data rows start
     start_row = 8
-    num_fmt = "# ##0,00"
+    # Use dot in format code so Excel maps to locale correctly (comma decimal locales
+    # will still display commas), and keep space as thousands separator.
+    num_fmt = "# ##0.00;-# ##0.00;0.00"
+
+    def num(value: Any) -> float:
+        try:
+            return round(float(value or 0.0), 2)
+        except (TypeError, ValueError):
+            return 0.0
 
     def account_class(value: Any) -> str | None:
         if value is None or value == "":
@@ -375,26 +385,30 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
         cell.alignment = left
         cell.number_format = "@"
         ws.cell(row=r, column=2, value=row.get("kos_bezeich_2", "")).alignment = left
-        ws.cell(row=r, column=3, value=row.get("saldo", 0.0)).number_format = num_fmt
-        ws.cell(row=r, column=4, value=row.get("eb_saldo", 0.0)).number_format = num_fmt
-        ws.cell(row=r, column=5, value=row.get("peri_soll", 0.0)).number_format = num_fmt
-        ws.cell(row=r, column=6, value=row.get("peri_haben", 0.0)).number_format = num_fmt
-        ws.cell(row=r, column=7, value=row.get("kum_soll", 0.0)).number_format = num_fmt
-        ws.cell(row=r, column=8, value=row.get("kum_haben", 0.0)).number_format = num_fmt
+        ws.cell(row=r, column=3, value=num(row.get("eb_saldo", 0.0))).number_format = num_fmt
+        ws.cell(row=r, column=4, value=num(row.get("peri_soll", 0.0))).number_format = num_fmt
+        ws.cell(row=r, column=5, value=num(row.get("peri_haben", 0.0))).number_format = num_fmt
+        ws.cell(row=r, column=6, value=num(row.get("kum_soll", 0.0))).number_format = num_fmt
+        ws.cell(row=r, column=7, value=num(row.get("kum_haben", 0.0))).number_format = num_fmt
+        ws.cell(row=r, column=8, value=num(row.get("saldo", 0.0))).number_format = num_fmt
         for c in range(3, 9):
             ws.cell(row=r, column=c).alignment = right
 
     def write_subtotal_row(r: int, klass: str, totals: dict[str, float]) -> None:
         ws.cell(row=r, column=2, value=f"Summe Kontenklasse {klass}").font = table_header_font
         ws.cell(row=r, column=2).alignment = left
-        ws.cell(row=r, column=3, value=totals["saldo"]).number_format = num_fmt
-        ws.cell(row=r, column=4, value=totals["eb_saldo"]).number_format = num_fmt
-        ws.cell(row=r, column=5, value=totals["peri_soll"]).number_format = num_fmt
-        ws.cell(row=r, column=6, value=totals["peri_haben"]).number_format = num_fmt
-        ws.cell(row=r, column=7, value=totals["kum_soll"]).number_format = num_fmt
-        ws.cell(row=r, column=8, value=totals["kum_haben"]).number_format = num_fmt
+        ws.cell(row=r, column=3, value=num(totals["eb_saldo"])).number_format = num_fmt
+        ws.cell(row=r, column=4, value=num(totals["peri_soll"])).number_format = num_fmt
+        ws.cell(row=r, column=5, value=num(totals["peri_haben"])).number_format = num_fmt
+        ws.cell(row=r, column=6, value=num(totals["kum_soll"])).number_format = num_fmt
+        ws.cell(row=r, column=7, value=num(totals["kum_haben"])).number_format = num_fmt
+        ws.cell(row=r, column=8, value=num(totals["saldo"])).number_format = num_fmt
         for c in range(3, 9):
             ws.cell(row=r, column=c).alignment = right
+        # Thick border above and below subtotal row
+        for c in range(1, max_col + 1):
+            cell = ws.cell(row=r, column=c)
+            cell.border = Border(top=medium, bottom=medium, left=cell.border.left, right=cell.border.right)
 
     current_class = None
     subtotal = {
@@ -409,12 +423,12 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
     for _, row in df.iterrows():
         # Skip rows where all numeric values are zero.
         values = [
-            row.get("saldo", 0.0),
             row.get("eb_saldo", 0.0),
             row.get("peri_soll", 0.0),
             row.get("peri_haben", 0.0),
             row.get("kum_soll", 0.0),
             row.get("kum_haben", 0.0),
+            row.get("saldo", 0.0),
         ]
         if all(float(v or 0.0) == 0.0 for v in values):
             continue
@@ -440,6 +454,43 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
     if current_class is not None:
         write_subtotal_row(r, current_class, subtotal)
         r += 1
+
+    # Borders: vertical lines for all table columns and outer frame
+    table_top = 6
+    table_bottom = r - 1
+    for row_idx in range(table_top, table_bottom + 1):
+        for col_idx in range(1, max_col + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            left_side = thin
+            right_side = thin
+            top_side = cell.border.top
+            bottom_side = cell.border.bottom
+
+            if col_idx == 1:
+                left_side = medium
+            if col_idx == max_col:
+                right_side = medium
+            if row_idx == table_top:
+                top_side = medium
+            if row_idx == table_bottom:
+                bottom_side = medium
+
+            cell.border = Border(
+                left=left_side,
+                right=right_side,
+                top=top_side,
+                bottom=bottom_side,
+            )
+
+    # Header bottom thick line (row 7)
+    for c in range(1, max_col + 1):
+        cell = ws.cell(row=7, column=c)
+        cell.border = Border(
+            left=cell.border.left,
+            right=cell.border.right,
+            top=cell.border.top,
+            bottom=medium,
+        )
 
     # Print setup
     ws.page_setup.paperSize = ws.PAPERSIZE_A4
