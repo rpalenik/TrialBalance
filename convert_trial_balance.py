@@ -32,6 +32,37 @@ class ReportPeriod:
     month: int
 
 
+@dataclass(frozen=True)
+class MissingAccount:
+    account: str
+    debit: float
+    credit: float
+    diff: float
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    debit_field: str
+    credit_field: str
+    source_debit: float
+    source_credit: float
+    source_diff: float
+    template_debit: float
+    template_credit: float
+    template_diff: float
+    tolerance: float
+    missing_accounts: list[MissingAccount]
+
+
+@dataclass(frozen=True)
+class RunResult:
+    output_path: Path
+    report_path: Path | None
+    period: ReportPeriod
+    summary: RunSummary
+    summary_path: Path
+
+
 def load_config(path: Path) -> Config:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return Config(
@@ -263,7 +294,7 @@ def write_output(
     accounts: Dict[str, int],
     source_df: pd.DataFrame,
     output_path: Path,
-) -> None:
+) -> RunSummary:
     template_cfg = cfg.template
     write_cols = template_cfg["write_columns"]
 
@@ -280,6 +311,7 @@ def write_output(
     tol = float(cfg.rules.get("closing_tolerance", 0.01))
     debit_field = cfg.rules.get("debit_field", "debit")
     credit_field = cfg.rules.get("credit_field", "credit")
+    debit_credit_tol = float(cfg.rules.get("debit_credit_tolerance", 0.01))
     closing_fields = cfg.rules.get("closing_check_fields", {})
 
     for account, row_idx in accounts.items():
@@ -309,7 +341,7 @@ def write_output(
 
     if cfg.rules.get("debit_credit_check", True):
         diff = abs(totals["debit"] - totals["credit"])
-        if diff > float(cfg.rules.get("debit_credit_tolerance", 0.01)):
+        if diff > debit_credit_tol:
             print(
                 f"WARNING: Debit/Credit mismatch: debit={totals['debit']:.2f} "
                 f"credit={totals['credit']:.2f} diff={diff:.2f}"
@@ -320,6 +352,82 @@ def write_output(
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(output_path)
+    source_debit = float(source_df[debit_field].sum()) if debit_field in source_df else 0.0
+    source_credit = (
+        float(source_df[credit_field].sum()) if credit_field in source_df else 0.0
+    )
+
+    missing_accounts = []
+    missing_df = source_df[~source_df["account"].isin(accounts.keys())]
+    if debit_field in missing_df and credit_field in missing_df:
+        for _, row in missing_df.iterrows():
+            debit = float(row.get(debit_field, 0.0) or 0.0)
+            credit = float(row.get(credit_field, 0.0) or 0.0)
+            missing_accounts.append(
+                MissingAccount(
+                    account=str(row["account"]),
+                    debit=debit,
+                    credit=credit,
+                    diff=debit - credit,
+                )
+            )
+        missing_accounts.sort(key=lambda item: abs(item.diff), reverse=True)
+
+    return RunSummary(
+        debit_field=debit_field,
+        credit_field=credit_field,
+        source_debit=source_debit,
+        source_credit=source_credit,
+        source_diff=source_debit - source_credit,
+        template_debit=float(totals["debit"]),
+        template_credit=float(totals["credit"]),
+        template_diff=float(totals["debit"] - totals["credit"]),
+        tolerance=debit_credit_tol,
+        missing_accounts=missing_accounts,
+    )
+
+
+def write_run_report(output_path: Path, summary: RunSummary) -> Path:
+    report_path = output_path.with_name(f"{output_path.stem}_run_report.txt")
+    lines = [
+        "Trial Balance Run Report",
+        f"Generated from: {output_path.name}",
+        "",
+        f"Debit field: {summary.debit_field}",
+        f"Credit field: {summary.credit_field}",
+        "",
+        "Source totals (all accounts from input):",
+        f"  debit  = {summary.source_debit:.2f}",
+        f"  credit = {summary.source_credit:.2f}",
+        f"  diff   = {summary.source_diff:.2f}",
+        "",
+        "Template-covered totals (accounts present in template):",
+        f"  debit  = {summary.template_debit:.2f}",
+        f"  credit = {summary.template_credit:.2f}",
+        f"  diff   = {summary.template_diff:.2f}",
+        f"  tolerance = {summary.tolerance:.2f}",
+        "",
+    ]
+
+    if abs(summary.template_diff) <= summary.tolerance:
+        lines.append("Status: OK (template MD/DAL check within tolerance)")
+    else:
+        lines.append("Status: MISMATCH (template MD/DAL check failed)")
+        lines.append(
+            "Most common cause: account appears in input but is missing in template."
+        )
+
+    lines.append("")
+    lines.append(f"Missing accounts in template: {len(summary.missing_accounts)}")
+    if summary.missing_accounts:
+        lines.append("Account | Debit | Credit | Diff")
+        for item in summary.missing_accounts:
+            lines.append(
+                f"{item.account} | {item.debit:.2f} | {item.credit:.2f} | {item.diff:.2f}"
+            )
+
+    report_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return report_path
 
 
 def build_output_path(cfg: Config, override: str | None) -> Path:
@@ -592,6 +700,31 @@ def build_report(
     return out_path
 
 
+def run_conversion(
+    cfg: Config,
+    input_path: Path,
+    template_path: Path,
+    output_override: str | None = None,
+) -> RunResult:
+    output_path = build_output_path(cfg, output_override)
+    report_period = extract_report_period(cfg, input_path)
+
+    source_df = read_source(cfg, input_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(template_path, output_path)
+    wb, accounts = read_template_accounts(cfg, output_path)
+    summary = write_output(cfg, wb, accounts, source_df, output_path)
+    report_path = build_report(cfg, output_path, report_period)
+    summary_path = write_run_report(output_path, summary)
+    return RunResult(
+        output_path=output_path,
+        report_path=report_path,
+        period=report_period,
+        summary=summary,
+        summary_path=summary_path,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Convert zostava.xlsx to Trial Balance template")
     parser.add_argument("--config", default="config.yaml", help="Path to config.yaml")
@@ -604,20 +737,12 @@ def main() -> None:
 
     input_path = Path(args.input or cfg.source["path"])
     template_path = Path(args.template or cfg.template["path"])
-    output_path = build_output_path(cfg, args.output)
-    report_period = extract_report_period(cfg, input_path)
+    result = run_conversion(cfg, input_path, template_path, args.output)
 
-    source_df = read_source(cfg, input_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(template_path, output_path)
-    wb, accounts = read_template_accounts(cfg, output_path)
-    write_output(cfg, wb, accounts, source_df, output_path)
-
-    print(f"Saved: {output_path}")
-
-    report_path = build_report(cfg, output_path, report_period)
-    if report_path:
-        print(f"Report saved: {report_path}")
+    print(f"Saved: {result.output_path}")
+    if result.report_path:
+        print(f"Report saved: {result.report_path}")
+    print(f"Run report: {result.summary_path}")
 
 
 if __name__ == "__main__":
