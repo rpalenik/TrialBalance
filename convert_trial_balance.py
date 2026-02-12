@@ -26,6 +26,12 @@ class Config:
     rules: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class ReportPeriod:
+    year: int
+    month: int
+
+
 def load_config(path: Path) -> Config:
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return Config(
@@ -98,6 +104,73 @@ def parse_number(value: Any, fmt: Dict[str, Any]) -> float:
         return 0.0
 
     return -num if negative else num
+
+
+def extract_report_period(cfg: Config, input_path: Path) -> ReportPeriod:
+    source_cfg = cfg.source
+    sheet = source_cfg.get("sheet", 0)
+    header_row = int(source_cfg.get("header_row", 1))
+    data_start_row = int(source_cfg.get("data_start_row", header_row + 1))
+
+    df = pd.read_excel(
+        input_path,
+        sheet_name=sheet,
+        header=None,
+        engine="calamine",
+    )
+    headers = df.iloc[header_row - 1]
+
+    def find_col(name: str) -> int:
+        for idx, value in headers.items():
+            if str(value).strip().upper() == name:
+                return int(idx)
+        raise ValueError(
+            f"Missing required '{name}' column in source file '{input_path}'."
+        )
+
+    month_col = find_col("MESIC")
+    year_col = find_col("ROK")
+
+    data = df.iloc[data_start_row - 1 :].copy()
+    months = sorted(
+        {
+            int(v)
+            for v in pd.to_numeric(data.iloc[:, month_col], errors="coerce").dropna()
+        }
+    )
+    years = sorted(
+        {int(v) for v in pd.to_numeric(data.iloc[:, year_col], errors="coerce").dropna()}
+    )
+
+    if not months:
+        raise ValueError(
+            f"Missing processing month values in column 'MESIC' in '{input_path}'."
+        )
+    if not years:
+        raise ValueError(
+            f"Missing processing year values in column 'ROK' in '{input_path}'."
+        )
+    if len(months) != 1:
+        raise ValueError(
+            f"Expected exactly one month in 'MESIC', found {months} in '{input_path}'."
+        )
+    if len(years) != 1:
+        raise ValueError(
+            f"Expected exactly one year in 'ROK', found {years} in '{input_path}'."
+        )
+
+    month = months[0]
+    year = years[0]
+    if month < 1 or month > 12:
+        raise ValueError(
+            f"Invalid processing month '{month}' in 'MESIC' in '{input_path}'."
+        )
+    if year < 1900 or year > 3000:
+        raise ValueError(
+            f"Invalid processing year '{year}' in 'ROK' in '{input_path}'."
+        )
+
+    return ReportPeriod(year=year, month=month)
 
 
 def read_source(cfg: Config, input_path: Path) -> pd.DataFrame:
@@ -269,7 +342,9 @@ def build_report_path(cfg: Config) -> Path:
     return Path(rep_cfg.get("output_dir", "output")) / filename
 
 
-def build_report(cfg: Config, source_output_path: Path) -> Path | None:
+def build_report(
+    cfg: Config, source_output_path: Path, period: ReportPeriod
+) -> Path | None:
     rep_cfg = cfg.report
     if not rep_cfg.get("enabled", False):
         return None
@@ -333,7 +408,10 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
     ws.cell(row=6, column=3).alignment = center
 
     ws.merge_cells(start_row=6, start_column=4, end_row=6, end_column=5)
-    ws.cell(row=6, column=4, value=rep_cfg.get("period_label", "")).font = table_header_font
+    period_label = (
+        f"Periode {period.year}/{period.month:02d} - {period.year}/{period.month:02d}"
+    )
+    ws.cell(row=6, column=4, value=period_label).font = table_header_font
     ws.cell(row=6, column=4).alignment = center
     ws.cell(row=7, column=4, value="Soll").font = table_header_font
     ws.cell(row=7, column=4).alignment = center
@@ -341,7 +419,8 @@ def build_report(cfg: Config, source_output_path: Path) -> Path | None:
     ws.cell(row=7, column=5).alignment = center
 
     ws.merge_cells(start_row=6, start_column=6, end_row=6, end_column=7)
-    ws.cell(row=6, column=6, value=rep_cfg.get("cumulative_label", "")).font = table_header_font
+    cumulative_label = f"Kumuliert {period.year}/01 - {period.year}/{period.month:02d}"
+    ws.cell(row=6, column=6, value=cumulative_label).font = table_header_font
     ws.cell(row=6, column=6).alignment = center
     ws.cell(row=7, column=6, value="Soll").font = table_header_font
     ws.cell(row=7, column=6).alignment = center
@@ -526,6 +605,7 @@ def main() -> None:
     input_path = Path(args.input or cfg.source["path"])
     template_path = Path(args.template or cfg.template["path"])
     output_path = build_output_path(cfg, args.output)
+    report_period = extract_report_period(cfg, input_path)
 
     source_df = read_source(cfg, input_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -535,7 +615,7 @@ def main() -> None:
 
     print(f"Saved: {output_path}")
 
-    report_path = build_report(cfg, output_path)
+    report_path = build_report(cfg, output_path, report_period)
     if report_path:
         print(f"Report saved: {report_path}")
 
