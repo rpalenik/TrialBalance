@@ -1,0 +1,45 @@
+name: Windows App Build
+
+on:
+  push:
+    branches:
+      - master
+      - "codex/**"
+  pull_request:
+    branches:
+      - master
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas pyyaml openpyxl python-calamine pyinstaller
+
+      - name: Smoke check (syntax)
+        run: |
+          python -m py_compile convert_trial_balance.py desktop_app.py
+
+      - name: Build Windows EXE
+        run: |
+          pyinstaller --noconfirm --clean --windowed --onefile --name TrialBalanceApp --add-data "config.yaml;." --add-data "templates;templates" desktop_app.py
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TrialBalanceApp-windows
+          path: |
+            dist/TrialBalanceApp.exe
+            config.yaml
+            templates/Trial Balance_template.xlsx
