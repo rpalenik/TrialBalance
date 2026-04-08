@@ -10,10 +10,10 @@ source:
     analytic_width: 3
   columns:
     eb_saldo: "M"
-    peri_soll: "Q"
-    peri_haben: "R"
-    kum_soll: "O"
-    kum_haben: "P"
+    peri_soll: "O"
+    peri_haben: "P"
+    kum_soll: "Q"
+    kum_haben: "R"
     saldo: "S"
   number_format:
     decimal_comma: true
