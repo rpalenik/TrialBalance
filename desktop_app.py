@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import threading
 import traceback
 from pathlib import Path
@@ -21,7 +22,11 @@ class TrialBalanceApp:
         self.root.geometry("860x520")
         self.root.minsize(820, 460)
 
-        self.base_dir = Path(__file__).resolve().parent
+        if getattr(sys, "frozen", False):
+            # Running from packaged executable (PyInstaller).
+            self.base_dir = Path(sys.executable).resolve().parent
+        else:
+            self.base_dir = Path(__file__).resolve().parent
         self.config_path = self.base_dir / "config.yaml"
         self.last_result: RunResult | None = None
 
