@@ -139,6 +139,12 @@ class TrialBalanceApp:
         self._append_log(
             f"Period: {result.period.year}/{result.period.month:02d}"
         )
+        self._append_log(
+            "Selected latest month: "
+            f"{result.summary.selected_year}/{result.summary.selected_month:02d} "
+            f"(rows {result.summary.rows_before_filter} -> "
+            f"{result.summary.rows_after_filter})"
+        )
         md_dal_status = (
             "OK"
             if abs(result.summary.template_diff) <= result.summary.tolerance

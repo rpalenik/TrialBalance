@@ -42,6 +42,10 @@ class MissingAccount:
 
 @dataclass(frozen=True)
 class RunSummary:
+    selected_year: int
+    selected_month: int
+    rows_before_filter: int
+    rows_after_filter: int
     debit_field: str
     credit_field: str
     source_debit: float
@@ -61,6 +65,14 @@ class RunResult:
     period: ReportPeriod
     summary: RunSummary
     summary_path: Path
+
+
+@dataclass(frozen=True)
+class SourceReadResult:
+    dataframe: pd.DataFrame
+    period: ReportPeriod
+    rows_before_filter: int
+    rows_after_filter: int
 
 
 def load_config(path: Path) -> Config:
@@ -137,6 +149,69 @@ def parse_number(value: Any, fmt: Dict[str, Any]) -> float:
     return -num if negative else num
 
 
+def _find_header_col(headers: pd.Series, name: str, input_path: Path) -> int:
+    target = name.upper()
+    for idx, value in headers.items():
+        if str(value).strip().upper() == target:
+            return int(idx)
+    raise ValueError(
+        f"Missing required '{name}' column in source file '{input_path}'."
+    )
+
+
+def select_latest_period_rows(
+    df: pd.DataFrame, header_row: int, data_start_row: int, input_path: Path
+) -> tuple[pd.DataFrame, ReportPeriod, int, int]:
+    headers = df.iloc[header_row - 1]
+    month_col = _find_header_col(headers, "MESIC", input_path)
+    year_col = _find_header_col(headers, "ROK", input_path)
+
+    data = df.iloc[data_start_row - 1 :].copy()
+    rows_before = int(len(data))
+
+    month_values = pd.to_numeric(data.iloc[:, month_col], errors="coerce")
+    year_values = pd.to_numeric(data.iloc[:, year_col], errors="coerce")
+
+    valid_mask = month_values.notna() & year_values.notna()
+    data = data.loc[valid_mask].copy()
+    month_values = month_values.loc[valid_mask]
+    year_values = year_values.loc[valid_mask]
+
+    if data.empty:
+        raise ValueError(
+            f"No rows with valid 'MESIC' and 'ROK' values in '{input_path}'."
+        )
+
+    max_month = int(month_values.max())
+    if max_month < 1 or max_month > 12:
+        raise ValueError(
+            f"Invalid latest month '{max_month}' in 'MESIC' in '{input_path}'."
+        )
+
+    latest_mask = month_values.astype(int) == max_month
+    filtered = data.loc[latest_mask].copy()
+    rows_after = int(len(filtered))
+    if rows_after == 0:
+        raise ValueError(
+            f"No rows found for latest month '{max_month}' in '{input_path}'."
+        )
+
+    years = sorted({int(v) for v in year_values.loc[latest_mask].astype(int)})
+    if len(years) != 1:
+        raise ValueError(
+            f"Expected exactly one year for latest month '{max_month}', "
+            f"found {years} in '{input_path}'."
+        )
+
+    year = years[0]
+    if year < 1900 or year > 3000:
+        raise ValueError(
+            f"Invalid processing year '{year}' in 'ROK' in '{input_path}'."
+        )
+
+    return filtered, ReportPeriod(year=year, month=max_month), rows_before, rows_after
+
+
 def extract_report_period(cfg: Config, input_path: Path) -> ReportPeriod:
     source_cfg = cfg.source
     sheet = source_cfg.get("sheet", 0)
@@ -149,62 +224,13 @@ def extract_report_period(cfg: Config, input_path: Path) -> ReportPeriod:
         header=None,
         engine="calamine",
     )
-    headers = df.iloc[header_row - 1]
-
-    def find_col(name: str) -> int:
-        for idx, value in headers.items():
-            if str(value).strip().upper() == name:
-                return int(idx)
-        raise ValueError(
-            f"Missing required '{name}' column in source file '{input_path}'."
-        )
-
-    month_col = find_col("MESIC")
-    year_col = find_col("ROK")
-
-    data = df.iloc[data_start_row - 1 :].copy()
-    months = sorted(
-        {
-            int(v)
-            for v in pd.to_numeric(data.iloc[:, month_col], errors="coerce").dropna()
-        }
+    _, period, _, _ = select_latest_period_rows(
+        df, header_row=header_row, data_start_row=data_start_row, input_path=input_path
     )
-    years = sorted(
-        {int(v) for v in pd.to_numeric(data.iloc[:, year_col], errors="coerce").dropna()}
-    )
-
-    if not months:
-        raise ValueError(
-            f"Missing processing month values in column 'MESIC' in '{input_path}'."
-        )
-    if not years:
-        raise ValueError(
-            f"Missing processing year values in column 'ROK' in '{input_path}'."
-        )
-    if len(months) != 1:
-        raise ValueError(
-            f"Expected exactly one month in 'MESIC', found {months} in '{input_path}'."
-        )
-    if len(years) != 1:
-        raise ValueError(
-            f"Expected exactly one year in 'ROK', found {years} in '{input_path}'."
-        )
-
-    month = months[0]
-    year = years[0]
-    if month < 1 or month > 12:
-        raise ValueError(
-            f"Invalid processing month '{month}' in 'MESIC' in '{input_path}'."
-        )
-    if year < 1900 or year > 3000:
-        raise ValueError(
-            f"Invalid processing year '{year}' in 'ROK' in '{input_path}'."
-        )
-
-    return ReportPeriod(year=year, month=month)
+    return period
 
 
-def read_source(cfg: Config, input_path: Path) -> pd.DataFrame:
+def read_source(cfg: Config, input_path: Path) -> SourceReadResult:
     source_cfg = cfg.source
     sheet = source_cfg.get("sheet", 0)
     header_row = int(source_cfg.get("header_row", 1))
@@ -222,7 +248,19 @@ def read_source(cfg: Config, input_path: Path) -> pd.DataFrame:
         for key, letter in source_cfg["columns"].items()
     }
 
-    data = df.iloc[data_start_row - 1 :].copy()
+    data, period, rows_before, rows_after = select_latest_period_rows(
+        df, header_row=header_row, data_start_row=data_start_row, input_path=input_path
+    )
+
+    missing = [
+        f"{key}({letter})"
+        for key, letter in source_cfg["columns"].items()
+        if col_letter_to_index(letter) not in data.columns
+    ]
+    if missing:
+        raise ValueError(
+            f"Configured source columns not found in '{input_path}': {', '.join(missing)}."
+        )
 
     account_parts = source_cfg.get("account_parts")
     if account_parts:
@@ -265,7 +303,12 @@ def read_source(cfg: Config, input_path: Path) -> pd.DataFrame:
     if cfg.rules.get("duplicate_accounts") == "sum":
         data = data.groupby("account", as_index=False).sum(numeric_only=True)
 
-    return data
+    return SourceReadResult(
+        dataframe=data,
+        period=period,
+        rows_before_filter=rows_before,
+        rows_after_filter=rows_after,
+    )
 
 
 def read_template_accounts(cfg: Config, template_path: Path) -> Tuple[Any, Dict[str, int]]:
@@ -294,6 +337,9 @@ def write_output(
     accounts: Dict[str, int],
     source_df: pd.DataFrame,
     output_path: Path,
+    period: ReportPeriod,
+    rows_before_filter: int,
+    rows_after_filter: int,
 ) -> RunSummary:
     template_cfg = cfg.template
     write_cols = template_cfg["write_columns"]
@@ -374,6 +420,10 @@ def write_output(
         missing_accounts.sort(key=lambda item: abs(item.diff), reverse=True)
 
     return RunSummary(
+        selected_year=period.year,
+        selected_month=period.month,
+        rows_before_filter=rows_before_filter,
+        rows_after_filter=rows_after_filter,
         debit_field=debit_field,
         credit_field=credit_field,
         source_debit=source_debit,
@@ -392,6 +442,10 @@ def write_run_report(output_path: Path, summary: RunSummary) -> Path:
     lines = [
         "Trial Balance Run Report",
         f"Generated from: {output_path.name}",
+        "",
+        f"Selected latest month: {summary.selected_year}/{summary.selected_month:02d}",
+        f"Rows before filter: {summary.rows_before_filter}",
+        f"Rows after filter: {summary.rows_after_filter}",
         "",
         f"Debit field: {summary.debit_field}",
         f"Credit field: {summary.credit_field}",
@@ -707,13 +761,22 @@ def run_conversion(
     output_override: str | None = None,
 ) -> RunResult:
     output_path = build_output_path(cfg, output_override)
-    report_period = extract_report_period(cfg, input_path)
-
-    source_df = read_source(cfg, input_path)
+    source_result = read_source(cfg, input_path)
+    source_df = source_result.dataframe
+    report_period = source_result.period
     output_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(template_path, output_path)
     wb, accounts = read_template_accounts(cfg, output_path)
-    summary = write_output(cfg, wb, accounts, source_df, output_path)
+    summary = write_output(
+        cfg,
+        wb,
+        accounts,
+        source_df,
+        output_path,
+        period=report_period,
+        rows_before_filter=source_result.rows_before_filter,
+        rows_after_filter=source_result.rows_after_filter,
+    )
     report_path = build_report(cfg, output_path, report_period)
     summary_path = write_run_report(output_path, summary)
     return RunResult(
